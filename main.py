@@ -1,102 +1,124 @@
+# =========================
+# PAPER TRADING BOT (NO REAL MONEY)
+# Start balance: 5000 USD
+# Strategy: RSI + EMA
+# Sends signals to Discord
+# =========================
+
 import ccxt
+import pandas as pd
+import ta
 import time
 import requests
-import pandas as pd
+from datetime import datetime
 
-# =========================
-# 🔧 SKAL DU ÆNDRE
-# =========================
+# ====== SETTINGS ======
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1450907994002034748/bkVfSwMdq9V9fxVBR2QpfjUBbVcLpDxoTXhXq_u9F6YAWbGNrMeCYr4SYAyE8UaWso2t"
 
-# 20 coins (spot)
+START_BALANCE = 5000.0
+TRADE_PERCENT = 0.05      # 5% per trade
+TIMEFRAME = "5m"
+LIMIT = 100
+
+RSI_BUY = 30
+RSI_SELL = 70
+
+EMA_FAST = 9
+EMA_SLOW = 21
+
 SYMBOLS = [
-    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
     "ADA/USDT", "AVAX/USDT", "DOGE/USDT", "DOT/USDT", "MATIC/USDT",
-    "LINK/USDT", "LTC/USDT", "UNI/USDT", "ATOM/USDT", "ETC/USDT",
-    "FIL/USDT", "APT/USDT", "ARB/USDT", "OP/USDT", "NEAR/USDT"
+    "LTC/USDT", "LINK/USDT", "ATOM/USDT", "OP/USDT", "ARB/USDT",
+    "SUI/USDT", "APT/USDT", "TRX/USDT", "FIL/USDT", "NEAR/USDT"
 ]
 
-TIMEFRAME = "5m"
-CANDLE_LIMIT = 100
-SCAN_DELAY = 60  # sekunder mellem scanninger
-
-# =========================
-# 📡 DISCORD
-# =========================
-def send_discord(msg):
-    data = {"content": msg}
-    requests.post(DISCORD_WEBHOOK_URL, json=data)
-
-# =========================
-# 📊 INDIKATORER
-# =========================
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-# =========================
-# 🔌 BINANCE (SPOT ONLY)
-# =========================
+# ====== EXCHANGE (PUBLIC DATA ONLY) ======
 exchange = ccxt.binance({
-    "enableRateLimit": True,
-    "options": {
-        "defaultType": "spot",   # 🚫 ingen futures
-    }
+    "enableRateLimit": True
 })
 
-exchange.load_markets()
+# ====== STATE ======
+balance = START_BALANCE
+positions = {}  # symbol -> {entry_price, amount}
 
-send_discord("🤖 **Scanner bot startet (paper trading)**")
+# ====== HELPERS ======
+def send_discord(msg):
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
+    except:
+        pass
 
-# =========================
-# 🔄 MAIN LOOP
-# =========================
+def fetch_indicators(symbol):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
+    df = pd.DataFrame(ohlcv, columns=["time","open","high","low","close","volume"])
+
+    df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
+    df["ema_fast"] = ta.trend.EMAIndicator(df["close"], window=EMA_FAST).ema_indicator()
+    df["ema_slow"] = ta.trend.EMAIndicator(df["close"], window=EMA_SLOW).ema_indicator()
+
+    return df.iloc[-1]
+
+# ====== START ======
+send_discord("🤖 **Paper Trading Bot startet**\nStart balance: **5000 USD**")
+
+print("Bot kører...")
+
+# ====== MAIN LOOP ======
 while True:
     for symbol in SYMBOLS:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
-            df = pd.DataFrame(
-                ohlcv,
-                columns=["time", "open", "high", "low", "close", "volume"]
-            )
+            data = fetch_indicators(symbol)
+            price = data["close"]
+            rsi = data["rsi"]
+            ema_fast = data["ema_fast"]
+            ema_slow = data["ema_slow"]
 
-            df["rsi"] = rsi(df["close"])
-            df["ema50"] = ema(df["close"], 50)
-            df["ema200"] = ema(df["close"], 200)
+            # ===== BUY =====
+            if symbol not in positions:
+                if rsi < RSI_BUY and ema_fast > ema_slow:
+                    trade_usd = balance * TRADE_PERCENT
+                    amount = trade_usd / price
 
-            last = df.iloc[-1]
-            price = round(last["close"], 4)
-            rsi_val = round(last["rsi"], 2)
+                    if trade_usd > balance:
+                        continue
 
-            # 🔔 SIMPEL SIGNAL LOGIK
-            if rsi_val < 30 and last["ema50"] > last["ema200"]:
-                send_discord(
-                    f"🟢 **PAPER BUY SIGNAL**\n"
-                    f"{symbol}\n"
-                    f"Pris: {price}\n"
-                    f"RSI: {rsi_val}"
-                )
+                    balance -= trade_usd
+                    positions[symbol] = {
+                        "entry_price": price,
+                        "amount": amount
+                    }
 
-            elif rsi_val > 70:
-                send_discord(
-                    f"🔴 **PAPER SELL SIGNAL**\n"
-                    f"{symbol}\n"
-                    f"Pris: {price}\n"
-                    f"RSI: {rsi_val}"
-                )
+                    send_discord(
+                        f"🟢 **BUY (PAPER)** {symbol}\n"
+                        f"Pris: {price:.2f}\n"
+                        f"RSI: {rsi:.2f}\n"
+                        f"Balance: {balance:.2f} USD"
+                    )
 
-        except Exception:
-            # 🚫 ingen Binance fejl spam
-            pass
+            # ===== SELL =====
+            else:
+                entry = positions[symbol]["entry_price"]
+                amount = positions[symbol]["amount"]
 
-    time.sleep(SCAN_DELAY)
+                if rsi > RSI_SELL and ema_fast < ema_slow:
+                    trade_value = amount * price
+                    pnl = trade_value - (amount * entry)
+                    balance += trade_value
+
+                    del positions[symbol]
+
+                    send_discord(
+                        f"🔴 **SELL (PAPER)** {symbol}\n"
+                        f"Pris: {price:.2f}\n"
+                        f"P/L: {pnl:.2f} USD\n"
+                        f"Balance: {balance:.2f} USD"
+                    )
+
+            time.sleep(1)
+
+        except Exception as e:
+            print(f"Fejl på {symbol}: {e}")
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Balance: {balance:.2f} USD")
+    time.sleep(60)
