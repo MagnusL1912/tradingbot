@@ -1,8 +1,7 @@
 # =========================
-# PAPER TRADING BOT (NO REAL MONEY)
-# Start balance: 5000 USD
-# Strategy: RSI + EMA
-# Sends signals to Discord
+# ADVANCED PAPER TRADING BOT
+# RSI + EMA + TREND
+# STOP LOSS & TAKE PROFIT
 # =========================
 
 import ccxt
@@ -12,113 +11,126 @@ import time
 import requests
 from datetime import datetime
 
-# ====== SETTINGS ======
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1450907994002034748/bkVfSwMdq9V9fxVBR2QpfjUBbVcLpDxoTXhXq_u9F6YAWbGNrMeCYr4SYAyE8UaWso2t"
+# ===== SETTINGS =====
+DISCORD_WEBHOOK_URL = "DIN_DISCORD_WEBHOOK"
 
-START_BALANCE = 5000.0
-TRADE_PERCENT = 0.05      # 5% per trade
+START_BALANCE = 100000.0
+TRADE_PERCENT = 0.03
+
 TIMEFRAME = "5m"
-LIMIT = 100
+LIMIT = 200
 
-RSI_BUY = 30
-RSI_SELL = 70
+RSI_BUY = 35
+RSI_SELL = 65
 
 EMA_FAST = 9
 EMA_SLOW = 21
+EMA_TREND = 200
+
+STOP_LOSS_PCT = 0.02     # 2%
+TAKE_PROFIT_PCT = 0.04  # 4%
 
 SYMBOLS = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-    "ADA/USDT", "AVAX/USDT", "DOGE/USDT", "DOT/USDT", "MATIC/USDT",
-    "LTC/USDT", "LINK/USDT", "ATOM/USDT", "OP/USDT", "ARB/USDT",
-    "SUI/USDT", "APT/USDT", "TRX/USDT", "FIL/USDT", "NEAR/USDT"
+    "BTC/USDT", "ETH/USDT", "SOL/USDT",
+    "BNB/USDT", "XRP/USDT", "AVAX/USDT"
 ]
 
-# ====== EXCHANGE (PUBLIC DATA ONLY) ======
-exchange = ccxt.binance({
-    "enableRateLimit": True
-})
+# ===== EXCHANGE (PUBLIC DATA) =====
+exchange = ccxt.bybit({"enableRateLimit": True})
 
-# ====== STATE ======
+# ===== STATE =====
 balance = START_BALANCE
-positions = {}  # symbol -> {entry_price, amount}
+positions = {}
 
-# ====== HELPERS ======
+# ===== HELPERS =====
 def send_discord(msg):
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={"content": msg})
     except:
         pass
 
-def fetch_indicators(symbol):
+def indicators(symbol):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=LIMIT)
-    df = pd.DataFrame(ohlcv, columns=["time","open","high","low","close","volume"])
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
-    df["rsi"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
-    df["ema_fast"] = ta.trend.EMAIndicator(df["close"], window=EMA_FAST).ema_indicator()
-    df["ema_slow"] = ta.trend.EMAIndicator(df["close"], window=EMA_SLOW).ema_indicator()
+    df["rsi"] = ta.momentum.RSIIndicator(df["c"], 14).rsi()
+    df["ema_fast"] = ta.trend.EMAIndicator(df["c"], EMA_FAST).ema_indicator()
+    df["ema_slow"] = ta.trend.EMAIndicator(df["c"], EMA_SLOW).ema_indicator()
+    df["ema_trend"] = ta.trend.EMAIndicator(df["c"], EMA_TREND).ema_indicator()
 
     return df.iloc[-1]
 
-# ====== START ======
-send_discord("🤖 **Paper Trading Bot startet**\nStart balance: **5000 USD**")
-
+# ===== START =====
+send_discord("🤖 Bot startet (Paper)\nBalance: 100,000 USD")
 print("Bot kører...")
 
-# ====== MAIN LOOP ======
+# ===== LOOP =====
 while True:
     for symbol in SYMBOLS:
         try:
-            data = fetch_indicators(symbol)
-            price = data["close"]
+            data = indicators(symbol)
+            price = data["c"]
+
             rsi = data["rsi"]
             ema_fast = data["ema_fast"]
             ema_slow = data["ema_slow"]
+            ema_trend = data["ema_trend"]
+
+            uptrend = price > ema_trend
 
             # ===== BUY =====
-            if symbol not in positions:
+            if symbol not in positions and uptrend:
                 if rsi < RSI_BUY and ema_fast > ema_slow:
-                    trade_usd = balance * TRADE_PERCENT
-                    amount = trade_usd / price
+                    usd = balance * TRADE_PERCENT
+                    amount = usd / price
 
-                    if trade_usd > balance:
-                        continue
-
-                    balance -= trade_usd
+                    balance -= usd
                     positions[symbol] = {
-                        "entry_price": price,
-                        "amount": amount
+                        "entry": price,
+                        "amount": amount,
+                        "sl": price * (1 - STOP_LOSS_PCT),
+                        "tp": price * (1 + TAKE_PROFIT_PCT)
                     }
 
                     send_discord(
-                        f"🟢 **BUY (PAPER)** {symbol}\n"
+                        f"🟢 BUY {symbol}\n"
                         f"Pris: {price:.2f}\n"
-                        f"RSI: {rsi:.2f}\n"
-                        f"Balance: {balance:.2f} USD"
+                        f"SL: {positions[symbol]['sl']:.2f}\n"
+                        f"TP: {positions[symbol]['tp']:.2f}"
                     )
 
-            # ===== SELL =====
-            else:
-                entry = positions[symbol]["entry_price"]
-                amount = positions[symbol]["amount"]
+            # ===== MANAGE POSITION =====
+            elif symbol in positions:
+                pos = positions[symbol]
 
-                if rsi > RSI_SELL and ema_fast < ema_slow:
-                    trade_value = amount * price
-                    pnl = trade_value - (amount * entry)
-                    balance += trade_value
-
+                # STOP LOSS
+                if price <= pos["sl"]:
+                    value = pos["amount"] * price
+                    pnl = value - (pos["amount"] * pos["entry"])
+                    balance += value
                     del positions[symbol]
 
                     send_discord(
-                        f"🔴 **SELL (PAPER)** {symbol}\n"
-                        f"Pris: {price:.2f}\n"
-                        f"P/L: {pnl:.2f} USD\n"
-                        f"Balance: {balance:.2f} USD"
+                        f"🛑 STOP LOSS {symbol}\n"
+                        f"P/L: {pnl:.2f}\nBalance: {balance:.2f}"
+                    )
+
+                # TAKE PROFIT
+                elif price >= pos["tp"]:
+                    value = pos["amount"] * price
+                    pnl = value - (pos["amount"] * pos["entry"])
+                    balance += value
+                    del positions[symbol]
+
+                    send_discord(
+                        f"💰 TAKE PROFIT {symbol}\n"
+                        f"P/L: {pnl:.2f}\nBalance: {balance:.2f}"
                     )
 
             time.sleep(1)
 
         except Exception as e:
-            print(f"Fejl på {symbol}: {e}")
+            print(f"{symbol} fejl: {e}")
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Balance: {balance:.2f} USD")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Balance: {balance:.2f}")
     time.sleep(60)
