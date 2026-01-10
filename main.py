@@ -1,7 +1,8 @@
 # =========================
-# ADVANCED PAPER TRADING BOT
+# PAPER TRADING BOT v3
 # RSI + EMA + TREND
-# STOP LOSS & TAKE PROFIT
+# STOP LOSS / TAKE PROFIT
+# FULL STATISTICS
 # =========================
 
 import ccxt
@@ -27,8 +28,8 @@ EMA_FAST = 9
 EMA_SLOW = 21
 EMA_TREND = 200
 
-STOP_LOSS_PCT = 0.02     # 2%
-TAKE_PROFIT_PCT = 0.04  # 4%
+STOP_LOSS_PCT = 0.02
+TAKE_PROFIT_PCT = 0.04
 
 SYMBOLS = [
     "BTC/USDT", "ETH/USDT", "SOL/USDT",
@@ -40,7 +41,15 @@ exchange = ccxt.bybit({"enableRateLimit": True})
 
 # ===== STATE =====
 balance = START_BALANCE
+peak_balance = START_BALANCE
 positions = {}
+
+# ===== STATS =====
+total_trades = 0
+wins = 0
+losses = 0
+total_pnl = 0.0
+last_report = time.time()
 
 # ===== HELPERS =====
 def send_discord(msg):
@@ -61,7 +70,7 @@ def indicators(symbol):
     return df.iloc[-1]
 
 # ===== START =====
-send_discord("🤖 Bot startet (Paper)\nBalance: 100,000 USD")
+send_discord("🤖 Bot startet (Paper Trading)\nBalance: 100,000 USD")
 print("Bot kører...")
 
 # ===== LOOP =====
@@ -92,45 +101,62 @@ while True:
                         "tp": price * (1 + TAKE_PROFIT_PCT)
                     }
 
-                    send_discord(
-                        f"🟢 BUY {symbol}\n"
-                        f"Pris: {price:.2f}\n"
-                        f"SL: {positions[symbol]['sl']:.2f}\n"
-                        f"TP: {positions[symbol]['tp']:.2f}"
-                    )
+                    send_discord(f"🟢 BUY {symbol} @ {price:.2f}")
 
-            # ===== MANAGE POSITION =====
+            # ===== MANAGE =====
             elif symbol in positions:
                 pos = positions[symbol]
 
-                # STOP LOSS
+                exit_trade = False
+
                 if price <= pos["sl"]:
-                    value = pos["amount"] * price
-                    pnl = value - (pos["amount"] * pos["entry"])
-                    balance += value
-                    del positions[symbol]
+                    exit_trade = True
 
-                    send_discord(
-                        f"🛑 STOP LOSS {symbol}\n"
-                        f"P/L: {pnl:.2f}\nBalance: {balance:.2f}"
-                    )
-
-                # TAKE PROFIT
                 elif price >= pos["tp"]:
+                    exit_trade = True
+
+                if exit_trade:
                     value = pos["amount"] * price
                     pnl = value - (pos["amount"] * pos["entry"])
+
                     balance += value
+                    total_trades += 1
+                    total_pnl += pnl
+
+                    if pnl > 0:
+                        wins += 1
+                    else:
+                        losses += 1
+
                     del positions[symbol]
 
                     send_discord(
-                        f"💰 TAKE PROFIT {symbol}\n"
-                        f"P/L: {pnl:.2f}\nBalance: {balance:.2f}"
+                        f"🔁 CLOSE {symbol}\n"
+                        f"P/L: {pnl:.2f}\n"
+                        f"Balance: {balance:.2f}"
                     )
 
+            peak_balance = max(peak_balance, balance)
             time.sleep(1)
 
         except Exception as e:
-            print(f"{symbol} fejl: {e}")
+            print(symbol, e)
+
+    # ===== HOURLY REPORT =====
+    if time.time() - last_report > 3600:
+        winrate = (wins / total_trades * 100) if total_trades > 0 else 0
+        drawdown = (peak_balance - balance)
+
+        send_discord(
+            f"📊 **BOT STATUS**\n"
+            f"Trades: {total_trades}\n"
+            f"Winrate: {winrate:.2f}%\n"
+            f"P/L: {total_pnl:.2f} USD\n"
+            f"Drawdown: {drawdown:.2f}\n"
+            f"Balance: {balance:.2f}"
+        )
+
+        last_report = time.time()
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Balance: {balance:.2f}")
     time.sleep(60)
